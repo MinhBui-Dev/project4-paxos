@@ -17,6 +17,10 @@ public final class PaxosClient extends Node implements Client {
     private final Address[] servers;
 
     //TODO: declare fields for your implementation ...
+    private int sequenceNumber;
+    private PaxosRequest request;
+    private PaxosReply reply;
+    private ClientTimer clientTimer;
 
     /* -------------------------------------------------------------------------
         Construction and Initialization
@@ -26,11 +30,14 @@ public final class PaxosClient extends Node implements Client {
         this.servers = servers;
         
         // TODO: initialize fields ...
+        sequenceNumber = 0;
+        clientTimer = new ClientTimer();
     }
 
     @Override
     public synchronized void init() {
         // No need to initialize
+        set(clientTimer,CLIENT_RETRY_MILLIS);
     }
 
     /* -------------------------------------------------------------------------
@@ -39,18 +46,27 @@ public final class PaxosClient extends Node implements Client {
     @Override
     public synchronized void sendCommand(Command operation) {
         // TODO: send command ...
+        sequenceNumber++;
+        request = new PaxosRequest(this.address(), sequenceNumber, operation);
+        reply = null;
+        for (Address server : servers) {
+            send(request, server);
+        }
     }
 
     @Override
     public synchronized boolean hasResult() {
         // TODO: check result available ...
-        return false;
+        return reply != null;
     }
 
     @Override
     public synchronized Result getResult() throws InterruptedException {
         // TODO: get result ...
-        return null;
+        while (reply == null) {
+            wait();
+        }
+        return reply.result();
     }
 
     /* -------------------------------------------------------------------------
@@ -58,6 +74,11 @@ public final class PaxosClient extends Node implements Client {
        -----------------------------------------------------------------------*/
     private synchronized void handlePaxosReply(PaxosReply m, Address sender) {
         // TODO: handle paxos server reply ...
+        if (reply == null && m.sequenceNum() == sequenceNumber) {
+            request = null;
+            reply = m;
+            notifyAll();
+        }
     }
 
     /* -------------------------------------------------------------------------
@@ -65,5 +86,11 @@ public final class PaxosClient extends Node implements Client {
        -----------------------------------------------------------------------*/
     private synchronized void onClientTimer(ClientTimer t) {
         // TODO: handle client request timeout ...
+        if (request != null && !hasResult()) {
+            for (Address server : servers) {
+                send(request, server);
+            }
+        }
+        set(t, CLIENT_RETRY_MILLIS);
     }
 }

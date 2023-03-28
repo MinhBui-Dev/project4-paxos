@@ -1,5 +1,6 @@
 package dslabs.paxos;
 
+import dslabs.framework.Address;
 import dslabs.framework.Message;
 import dslabs.framework.Result;
 import lombok.Data;
@@ -10,7 +11,7 @@ import lombok.Data;
 
 @Data
 public final class PaxosReply implements Message {
-    private final String id;
+    private final Address id;
     private final int sequenceNum;
     private final Result result;
 }
