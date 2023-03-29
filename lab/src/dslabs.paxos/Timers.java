@@ -5,7 +5,7 @@ import lombok.Data;
 
 @Data
 final class ClientTimer implements Timer {
-    static final int CLIENT_RETRY_MILLIS = 100;
+    static final int CLIENT_RETRY_MILLIS = 150;
 
     // TODO: add fields for client timer ...
     private int sequenceNumber;

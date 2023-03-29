@@ -8,7 +8,6 @@ import dslabs.framework.Application;
 import dslabs.framework.Command;
 import dslabs.framework.Node;
 import dslabs.kvstore.KVStore;
-import dslabs.kvstore.KVStore.Get;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -20,9 +19,6 @@ import java.util.TreeMap;
 import lombok.EqualsAndHashCode;
 import lombok.ToString;
 
-import static dslabs.paxos.ElectionTimer.ELECTION_MILLIS;
-import static dslabs.paxos.HeartbeatTimer.HEARTBEAT_MILLIS;
-import static dslabs.paxos.ProposalTimer.PROPOSAL_MILLIS;
 import static dslabs.paxos.ServerTimer.SERVER_RETRY_MILLIS;
 
 
@@ -54,6 +50,8 @@ public class PaxosServer extends Node {
     private final ArrayList<PaxosRequest> getPending = new ArrayList<>();
     private final TreeMap<Integer,Set<Address>> executedSlots = new TreeMap<>();
     private int[] count = {0,0};
+    private int delay, electionDelay = 0;
+    private int P2ADelay = 2;
 
     //private Multimap<Integer, Integer> map = ArrayListMultimap.create();
 
@@ -82,17 +80,28 @@ public class PaxosServer extends Node {
             active = true;
         } else {
             this.myBallot = new Ballot(INITIAL_BALLOT_NUMBER, this.self);
+            // counter for each server to delay sending vote request
+            int counter = 0;
+            for (int i = 0; i < servers.length; i++) {
+                if (servers[i].equals(self)) {
+                    delay = (servers.length - i) * 5;
+                    electionDelay = delay;
+                    counter = delay * 25;
+                }
+            }
+
+
             for (Address server : servers) {
                 if (!self.equals(server)) {
                     // System.out.println("Sending ballot to: " + server.toString() + " from: " + self.toString());
-                    send(new P1request(myBallot), server);
+                    //send(new P1request(myBallot), server);
                     waitingVote.add(server);
                 }
             }
             // System.out.println("Done sending ballots from: " + self.toString() + ". Starting election timer");
 
             // TODO: start election timer ...
-            set(new ServerTimer(myBallot), SERVER_RETRY_MILLIS);
+            set(new ServerTimer(myBallot), counter);
         }
     }
 
@@ -202,12 +211,14 @@ public class PaxosServer extends Node {
                     perform(m);
                 } else {
                     pending.add(m);
-                    Iterator<PaxosRequest> it = pending.iterator();
+
+                    propose(pending);
+                    /*Iterator<PaxosRequest> it = pending.iterator();
                     while (it.hasNext()) {
                         PaxosRequest request = it.next();
                         propose(request);
                         it.remove();
-                    }
+                    }*/
                 }
             }
         } else {
@@ -257,7 +268,7 @@ public class PaxosServer extends Node {
                             proposals.put(pv.slot_num(),pv.paxosRequest());
                         }
                     }
-                    //TreeMap<Integer,PaxosRequest> batchRequest = new TreeMap<>();
+                    TreeMap<Integer,PaxosRequest> batchRequest = new TreeMap<>();
                     for (int sn: proposals.keySet()) {
                         // TODO: check if slot number is higher than slotOut
                         if (sn < slotOut) {
@@ -266,17 +277,18 @@ public class PaxosServer extends Node {
                         if (sn >= slotIn) {
                             slotIn = sn + 1;
                         }
-                        //batchRequest.put(sn, proposals.get(sn));
-                        P2request p2request = new P2request(myBallot, sn, proposals.get(sn));
-                        commander(p2request);
+                        batchRequest.put(sn, proposals.get(sn));
+                        //P2request p2request = new P2request(myBallot, sn, proposals.get(sn));
+                        //commander(p2request);
                     }
-                    /*if (batchRequest.size() > 0) {
-                        P2request p2req = new P2request(myBallot, batchRequest);
-                        commander(p2req);
-                    }*/
+                    if (batchRequest.size() > 0) {
+                        //P2request p2req = new P2request(myBallot, batchRequest);
+                        commander(batchRequest);
+                    }
                 }
                 waitingVote.clear();
                 active = true;
+                propose(pending);
                 /*for (Address a : servers) {
                     if (!a.equals(self)) {
                         send(new Heartbeat(myBallot, slotGC,
@@ -290,7 +302,7 @@ public class PaxosServer extends Node {
 
 
     private void handleP2request(P2request m, Address sender) {
-        if (myBallot == null || (myBallot.compareTo(m.ballotNum()) <= 0 && m.slotNum() >= slotOut)) {
+        if (myBallot == null || (myBallot.compareTo(m.ballotNum()) <= 0 )) {
             /*if (myBallot.compareTo(m.ballotNum()) < 0) {
                 myBallot = m.ballotNum();
                 ballotchange = true;
@@ -302,37 +314,83 @@ public class PaxosServer extends Node {
             }*/
             preempted(m.ballotNum());
 
-            //TreeMap<Integer,PaxosRequest> batchRequest = m.requestLog();
+            TreeMap<Integer,PaxosRequest> batchRequest = m.requestLog();
+            TreeMap<Integer,PaxosRequest> batchAccepted = new TreeMap<>();
 
-
-            for(Pvalue pv: accepted) {
-                if (pv.slot_num() == m.slotNum()) {
-                    accepted.remove(pv);
-                    break;
+            for (int sn: batchRequest.keySet()) {
+                if (sn <= slotGC) {
+                    continue;
                 }
-            }
-            accepted.add(new Pvalue(m.slotNum(), m.ballotNum(),m.paxosRequest()));
-            proposals.put(m.slotNum(),m.paxosRequest());
-            if (m.slotNum() >= slotIn) {
-                slotIn = m.slotNum() + 1;
+                for (Pvalue pv : accepted) {
+                    if (pv.slot_num() == sn) {
+                        accepted.remove(pv);
+                        break;
+                    }
+                }
+                accepted.add(new Pvalue(sn, m.ballotNum(), batchRequest.get(sn)));
+                proposals.put(sn, batchRequest.get(sn));
+                if (sn >= slotIn) {
+                    slotIn = sn + 1;
+                }
+                batchAccepted.put(sn, batchRequest.get(sn));
             }
 
-            send(new P2reply(myBallot, m.slotNum(),m.paxosRequest()), sender);
+            send(new P2reply(myBallot, new TreeMap<>(batchAccepted),slotOut-1, false), sender);
         } else {
-            send(new P2reply(myBallot, m.slotNum(),null), sender);
+            send(new P2reply(myBallot, m.requestLog(),slotOut-1,true), sender);
         }
     }
 
     private void handleP2reply(P2reply m, Address sender) {
-        if (myBallot.equals(m.ballotNum()) && active && P2BReceived.containsKey(m.slotNum()) && m.paxosRequest() != null) {
+        if (myBallot.equals(m.ballotNum()) && active && !m.rejected()) {
 
-            Set<Address> set = P2BReceived.get(m.slotNum());
+            //Garbage collection
+            /*if (m.slotExecuted() > 0) {
+                if (executedSlots.containsKey(m.slotExecuted())) {
+                    Set<Address> servers = executedSlots.get(m.slotExecuted());
+                    servers.add(sender);
+                } else {
+                    Set<Address> servers = new HashSet<>();
+                    servers.add(sender);
+                    executedSlots.put(m.slotExecuted(), servers);
+                }
 
-            if (!set.contains(sender)){
-                return;
-            } else {
-                set.remove(sender);
-            }
+                int slotToGC = slotGC;
+
+                for (Integer sn: executedSlots.keySet()) {
+                    if (executedSlots.get(sn).size() == servers.length-1) {
+                        slotToGC = sn;
+                    }
+                }
+
+                if (slotToGC > slotGC) {
+                    for (int i = slotGC; i < slotToGC; i++) {
+                        garbageCollection(i);
+                    }
+                    slotGC = slotToGC - 1;
+                }
+            }*/
+
+
+            TreeMap<Integer, PaxosRequest> acceptedRequest = m.acceptedLog();
+            //System.out.println("keyset: " + acceptedRequest.keySet().toString());
+            for (int sn : acceptedRequest.keySet()) {
+                PaxosRequest request = acceptedRequest.get(sn);
+                if (sn <= slotGC) {
+                    continue;
+                }
+                //System.out.println(P2BReceived);
+                Set<Address> set = P2BReceived.get(sn);
+
+                if (set == null) {
+                    return;
+                }
+
+                if (!set.contains(sender)) {
+                    return;
+                } else {
+                    set.remove(sender);
+                }
 
 
             /*if (P2BReceived.containsKey(m.slotNum())) {
@@ -347,33 +405,36 @@ public class PaxosServer extends Node {
                 P2BReceived.put(m.slotNum(), set);
             }*/
 
+                if (2 * set.size() <
+                        servers.length) { // Quorum reached, send decision
+                    P2BReceived.remove(sn);
+                    if (decisions.containsKey(sn)) {
+                        return;
+                    }
+                    accepted.add(new Pvalue(sn, m.ballotNum(), request));
+                    decisions.put(sn, request);
 
-            if (2 * set.size() < servers.length) { // Quorum reached, send decision
-                //proposals.put(m.slotNum(), m.paxosRequest());
-                P2BReceived.remove(m.slotNum());
-                if (decisions.containsKey(m.slotNum())) {
-                    return;
+                    for (Address server : servers) {
+                        if (!server.equals(self)) {
+                            send(new Decision(sn, request), server);
+                        }
+                    }
+
+                    for (; ; ) {
+                        PaxosRequest paxosRequest = decisions.get(slotOut);
+                        if (paxosRequest == null) {
+                            break;
+                        }
+                        /*PaxosRequest paxosRequest1 = proposals.get(slotOut);
+                        // TODO: Maybe not be applicable
+                        if (paxosRequest1 != null && !paxosRequest1.equals(paxosRequest)) {
+                            //System.out.print("Request not matched, reproposing");
+                            propose(paxosRequest1);
+                        }*/
+                        perform(paxosRequest);
+                    }
+
                 }
-                accepted.add(new Pvalue(m.slotNum(), m.ballotNum(),m.paxosRequest()));
-                decisions.put(m.slotNum(), m.paxosRequest());
-                for (;;){
-                    PaxosRequest paxosRequest = decisions.get(slotOut);
-                    if (paxosRequest == null) {
-                        break;
-                    }
-                    PaxosRequest paxosRequest1 = proposals.get(slotOut);
-                    // TODO: Maybe not be applicable
-                    if (paxosRequest1 != null && !paxosRequest1.equals(paxosRequest)) {
-                        //System.out.print("Request not matched, reproposing");
-                        propose(paxosRequest1);
-                    }
-                    perform(paxosRequest);
-                }
-                /*for (Address server: servers) {
-                    if (!server.equals(self)) {
-                        send(new Decision(m.slotNum(), m.paxosRequest()), server);
-                    }
-                }*/
             }
 
         } else {
@@ -466,13 +527,32 @@ public class PaxosServer extends Node {
                 send(new P1request(myBallot), s);
             }
         } else if (active) {
+            // Send pending request
+
             // Resend Request
-            for (int sn: P2BReceived.keySet()) {
+            P2ADelay--;
+            if (P2ADelay == 0) {
+                P2ADelay = 2;
+                TreeMap<Integer, PaxosRequest> batchRequest = new TreeMap<>();
+                for (int sn: P2BReceived.keySet()) {
+                    batchRequest.put(sn, proposals.get(sn));
+                }
+                if (batchRequest.size() > 0) {
+                    for (Address s: servers){
+                        if (!s.equals(self)) {
+                            send(new P2request(myBallot, batchRequest), s);
+                        }
+                    }
+                }
+            }
+
+
+            /*for (int sn: P2BReceived.keySet()) {
                 Set<Address> set = P2BReceived.get(sn);
                 for (Address server: set) {
                     send(new P2request(myBallot, sn, proposals.get(sn)), server);
                 }
-            }
+            }*/
             // Resend heartbeat
             for (Address a: servers) {
                 if (!a.equals(self)) {
@@ -483,11 +563,15 @@ public class PaxosServer extends Node {
             //set(t, HEARTBEAT_MILLIS);
         } else {
             // Check if leader is alive
-            int sum = count[0] + count[1];
+            int sum = count[0];
             if (sum == 0) {
-                startElection(myBallot);
+                delay--;
+                if (delay == 0){
+                    startElection(myBallot);
+                    delay = electionDelay;
+                }
             } else {
-                count[1] = count[0];
+                //count[1] = count[0];
                 count[0] = 0;
             }
 
@@ -496,7 +580,7 @@ public class PaxosServer extends Node {
         set(t, SERVER_RETRY_MILLIS);
 
     }
-    private void onProposalTimer(ProposalTimer t) {
+    /*private void onProposalTimer(ProposalTimer t) {
         if (myBallot.equals(t.ballotNumber()) && (!decisions.containsKey(t.slotNumber())) && t.slotNumber() > slotGC){
             for (Address server: servers) {
                 if (!server.equals(self)) {
@@ -505,8 +589,8 @@ public class PaxosServer extends Node {
                 }
             }
         }
-    }
-    private void onElectionTimer(ElectionTimer t) {
+    }*/
+    /*private void onElectionTimer(ElectionTimer t) {
         // Check if majority is reached on leader election or preempted
         if (myBallot.equals(t.ballotNumber()) && !active){
             for (Address s: waitingVote) {
@@ -514,9 +598,9 @@ public class PaxosServer extends Node {
             }
             set(t, ELECTION_MILLIS);
         }
-    }
+    }*/
 
-    private void onHeartbeatTimer(HeartbeatTimer t) {
+    /*private void onHeartbeatTimer(HeartbeatTimer t) {
         // TODO: handle heartbeat timer ...
         if (active && myBallot.equals(t.ballotNumber())) {
             for (Address a: servers) {
@@ -527,7 +611,7 @@ public class PaxosServer extends Node {
             }
             set(t, HEARTBEAT_MILLIS);
         }
-    }
+    }*/
 
     private void garbageCollection(int i) {
         decisions.remove(i);
@@ -549,15 +633,23 @@ public class PaxosServer extends Node {
     /* -------------------------------------------------------------------------
         Utils
        -----------------------------------------------------------------------*/
-    private void commander(P2request p2req) {
-        Set<Address> serverSet = new HashSet<>();
+    private void commander(TreeMap<Integer, PaxosRequest> log) {
+
+        for (Integer sn: log.keySet()) {
+            Set<Address> serverSet = new HashSet<>();
+            for (Address server: servers) {
+                if (!server.equals(self)) {
+                    serverSet.add(server);
+                }
+            }
+            P2BReceived.put(sn, serverSet);
+        }
+        P2request p2request = new P2request(myBallot, new TreeMap<>(log));
         for (Address s: servers) {
             if (!s.equals(self)) {
-                send(p2req, s);
-                serverSet.add(s);
+                send(p2request, s);
             }
         }
-        P2BReceived.put(p2req.slotNum(), serverSet);
     }
 
     private void preempted(Ballot bn) {
@@ -573,12 +665,36 @@ public class PaxosServer extends Node {
 
     }
 
-    private void propose(PaxosRequest m) {
-        if (!decisions.containsKey(slotIn)) {
+    private void propose(Set<PaxosRequest> pending) {
+        Iterator<PaxosRequest> it = pending.iterator();
+        TreeMap<Integer, PaxosRequest> batchRequest = new TreeMap<>();
+        while (it.hasNext()) {
+            /*if (!decisions.containsKey(slotIn)) {
+                PaxosRequest request = it.next();
+                proposals.put(slotIn, request);
+                batchRequest.put(slotIn, request);
+                it.remove();
+            }
+            slotIn++;*/
+            for (int i = slotGC + 1;;i++) {
+                if(!proposals.containsKey(i) && !decisions.containsKey(i)) {
+                    proposals.put(i, it.next());
+                    batchRequest.put(i, proposals.get(i));
+                    it.remove();
+                    if (i >= slotIn) {
+                        slotIn = i + 1;
+                    }
+                    break;
+
+                }
+            }
+        }
+        commander(batchRequest);
+        /*if (!decisions.containsKey(slotIn)) {
             proposals.put(slotIn, m);
             commander(new P2request(myBallot, slotIn, m));
         }
-        slotIn++;
+        slotIn++;*/
     }
 
     private void perform(PaxosRequest m) {

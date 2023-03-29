@@ -25,8 +25,9 @@ class P1reply implements Message {
 class P2request implements Message {
     private final Ballot ballotNum;
 
-    private final int slotNum;
-    private final PaxosRequest paxosRequest;
+    //private final int slotNum;
+    //private final PaxosRequest paxosRequest;
+    private final TreeMap<Integer, PaxosRequest> requestLog;
 
 }
 
@@ -42,8 +43,11 @@ class P2CatchupRequest implements Message {
 @Data
 class P2reply implements Message {
     private final Ballot ballotNum;
-    private final int slotNum;
-    private final PaxosRequest paxosRequest;
+    //private final int slotNum;
+    //private final PaxosRequest paxosRequest;
+    private final TreeMap<Integer, PaxosRequest> acceptedLog;
+    private final int slotExecuted;
+    private final boolean rejected;
 }
 
 @Data
