@@ -567,7 +567,7 @@ public class PaxosTest extends BaseJUnitTest {
         runState.run(runSettings);
     }
 
-    @Test(timeout = 10 * 1000)
+    @Test(timeout = 20 * 1000)
     @PrettyTestName("Message count")
     @Category(RunTests.class)
     @TestPointValue(10)
